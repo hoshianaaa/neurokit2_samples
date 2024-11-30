@@ -34,20 +34,18 @@ ecg_signals = {
 # 解析結果を格納する辞書
 analysis_results = {}
 
-# サブプロットの総数を計算（各信号に対して4つのサブプロット：波形、Rピーク付き波形、RR間隔、波形特徴）
-total_subplots = len(ecg_signals) * 4
-
-# プロットの設定
-plt.figure(figsize=(15, 5 * len(ecg_signals)))  # 各信号ごとに高さを調整
-subplot_index = 1
-
+# 各信号に対して別々の図を作成
 for label, ecg in ecg_signals.items():
+    # 図の設定
+    plt.figure(figsize=(15, 20))
+    
     # 1. ECG信号のプロット
-    plt.subplot(total_subplots, 1, subplot_index)
+    plt.subplot(6, 1, 1)
     plt.plot(ecg, label=label)
-    plt.title(label)
+    plt.title(f"{label} - Raw ECG Signal")
+    plt.xlabel("Samples")
+    plt.ylabel("Amplitude")
     plt.legend()
-    subplot_index += 1
     
     # ECGの前処理とRピークの検出
     signals, info = nk.ecg_process(ecg, sampling_rate=sampling_rate)
@@ -70,14 +68,16 @@ for label, ecg in ecg_signals.items():
     else:
         hr_variability = np.nan  # データが不足している場合
     
-    # ECG波形の詳細な特徴を抽出（QRS幅、T波特徴など）
+    # ECG波形の詳細な特徴を抽出（P波、QRS複合体、T波）
     delineate = nk.ecg_delineate(ecg, r_peaks, sampling_rate=sampling_rate, method="dwt")
     
     # 戻り値が辞書かタプルかを確認
     if isinstance(delineate, dict):
         # 最新バージョン（辞書）の場合
-        qrs_start = delineate.get("ECG_QRS_Onsets", [])
-        qrs_end = delineate.get("ECG_QRS_Offsets", [])
+        p_onsets = delineate.get("ECG_P_Onsets", [])
+        p_offsets = delineate.get("ECG_P_Offsets", [])
+        qrs_onsets = delineate.get("ECG_QRS_Onsets", [])
+        qrs_offsets = delineate.get("ECG_QRS_Offsets", [])
         t_onsets = delineate.get("ECG_T_Onsets", [])
         t_offsets = delineate.get("ECG_T_Offsets", [])
     elif isinstance(delineate, tuple):
@@ -85,20 +85,22 @@ for label, ecg in ecg_signals.items():
         # タプルの内容を確認
         print(f"戻り値の型がタプルです。内容を確認します: {delineate}")
         # 以下は仮のインデックス。実際の内容に応じて調整してください。
-        # 例: (P_Onsets, QRS_Onsets, QRS_Offsets, T_Onsets, T_Offsets)
-        if len(delineate) >= 5:
-            qrs_start = delineate[1]
-            qrs_end = delineate[2]
-            t_onsets = delineate[3]
-            t_offsets = delineate[4]
+        # 例: (P_Onsets, P_Offsets, QRS_Onsets, QRS_Offsets, T_Onsets, T_Offsets)
+        if len(delineate) >= 6:
+            p_onsets = delineate[0]
+            p_offsets = delineate[1]
+            qrs_onsets = delineate[2]
+            qrs_offsets = delineate[3]
+            t_onsets = delineate[4]
+            t_offsets = delineate[5]
         else:
-            qrs_start, qrs_end, t_onsets, t_offsets = [], [], [], []
+            p_onsets, p_offsets, qrs_onsets, qrs_offsets, t_onsets, t_offsets = [], [], [], [], [], []
     else:
         # その他の戻り値形式の場合
-        qrs_start, qrs_end, t_onsets, t_offsets = [], [], [], []
+        p_onsets, p_offsets, qrs_onsets, qrs_offsets, t_onsets, t_offsets = [], [], [], [], [], []
     
     # QRS幅の計算
-    qrs_durations = (np.array(qrs_end) - np.array(qrs_start)) / sampling_rate  # 秒単位
+    qrs_durations = (np.array(qrs_offsets) - np.array(qrs_onsets)) / sampling_rate  # 秒単位
     
     # T波の振幅と持続時間の計算
     t_durations = (np.array(t_offsets) - np.array(t_onsets)) / sampling_rate  # 秒単位
@@ -117,99 +119,181 @@ for label, ecg in ecg_signals.items():
         except (IndexError, TypeError):
             t_amplitudes.append(np.nan)
     
+    # P波の振幅と持続時間の計算
+    p_durations = (np.array(p_offsets) - np.array(p_onsets)) / sampling_rate  # 秒単位
+    
+    p_amplitudes = []
+    for onset, offset in zip(p_onsets, p_offsets):
+        if np.isnan(onset) or np.isnan(offset):
+            p_amplitudes.append(np.nan)
+            continue
+        try:
+            p_wave = ecg[int(onset):int(offset)]
+            if len(p_wave) == 0:
+                p_amplitudes.append(np.nan)
+                continue
+            p_amplitudes.append(np.max(p_wave) - np.min(p_wave))
+        except (IndexError, TypeError):
+            p_amplitudes.append(np.nan)
+    
+    # PR間隔の計算（P波開始からRピークまで）
+    pr_intervals = []
+    for p_onset, r_peak in zip(p_onsets, r_peaks):
+        if np.isnan(p_onset):
+            pr_intervals.append(np.nan)
+            continue
+        pr_interval = (r_peak - p_onset) / sampling_rate
+        pr_intervals.append(pr_interval)
+    
+    pr_intervals = pd.Series(pr_intervals)
+    
+    # QT間隔の計算（QRS開始からT波終了まで）
+    qt_intervals = []
+    for q_onset, t_offset in zip(qrs_onsets, t_offsets):
+        if np.isnan(q_onset) or np.isnan(t_offset):
+            qt_intervals.append(np.nan)
+            continue
+        qt_interval = (t_offset - q_onset) / sampling_rate
+        qt_intervals.append(qt_interval)
+    
+    qt_intervals = pd.Series(qt_intervals)
+    
     # 解析結果を辞書に保存
     analysis_results[label] = {
         "R_Peaks": r_peaks,
         "Average_HR_bpm": heart_rate,
         "HRV_SDNN_sec": hr_variability,
         "RR_Intervals_sec": rr_intervals,
+        "P_Durations_sec": pd.Series(p_durations),
+        "P_Amplitudes_mV": pd.Series(p_amplitudes),
         "QRS_Durations_sec": pd.Series(qrs_durations),
         "T_Durations_sec": pd.Series(t_durations),
-        "T_Amplitudes": pd.Series(t_amplitudes)
+        "T_Amplitudes_mV": pd.Series(t_amplitudes),
+        "PR_Intervals_sec": pr_intervals,
+        "QT_Intervals_sec": qt_intervals
     }
     
     # 2. R-ピークをプロット
-    plt.subplot(total_subplots, 1, subplot_index)
+    plt.subplot(6, 1, 2)
     plt.plot(ecg, label=label)
     plt.plot(r_peaks, ecg[r_peaks], "ro", label="R-peaks")
-    plt.title(f"{label} with R-peaks")
+    plt.title(f"{label} - R-peaks")
+    plt.xlabel("Samples")
+    plt.ylabel("Amplitude")
     plt.legend()
-    subplot_index += 1
     
     # 3. RR間隔のプロット
-    plt.subplot(total_subplots, 1, subplot_index)
+    plt.subplot(6, 1, 3)
     plt.plot(rr_intervals, marker='o')
-    plt.title(f"{label} RR Intervals")
+    plt.title(f"{label} - RR Intervals")
     plt.xlabel("Beat Number")
     plt.ylabel("RR Interval (s)")
-    subplot_index += 1
     
-    # 4. 波形特徴のプロット（QRS幅、T波振幅など）
-    plt.subplot(total_subplots, 1, subplot_index)
+    # 4. P波の特徴をプロット
+    plt.subplot(6, 1, 4)
     plt.plot(ecg, label=label)
-    plt.title(f"{label} Waveform Features")
-    
-    # QRS幅を色付きで表示（凡例を一度だけ表示するためのフラグ）
-    qrs_plotted = False
-    for q_start, q_end in zip(qrs_start, qrs_end):
-        if np.isnan(q_start) or np.isnan(q_end):
+    plt.title(f"{label} - P Wave")
+    plt.xlabel("Samples")
+    plt.ylabel("Amplitude")
+    for p_onset, p_offset in zip(p_onsets, p_offsets):
+        if np.isnan(p_onset) or np.isnan(p_offset):
             continue
-        plt.axvspan(q_start, q_end, color='green', alpha=0.3, label="QRS Width" if not qrs_plotted else "")
-        qrs_plotted = True
+        plt.axvspan(p_onset, p_offset, color='blue', alpha=0.3, label="P Wave")
+    plt.legend()
     
-    # T波を色付きで表示（凡例を一度だけ表示するためのフラグ）
-    t_plotted = False
+    # 5. QRS複合体の特徴をプロット
+    plt.subplot(6, 1, 5)
+    plt.plot(ecg, label=label)
+    plt.title(f"{label} - QRS Complex")
+    plt.xlabel("Samples")
+    plt.ylabel("Amplitude")
+    for q_onset, q_offset in zip(qrs_onsets, qrs_offsets):
+        if np.isnan(q_onset) or np.isnan(q_offset):
+            continue
+        plt.axvspan(q_onset, q_offset, color='green', alpha=0.3, label="QRS Complex")
+    plt.legend()
+    
+    # 6. T波の特徴をプロット
+    plt.subplot(6, 1, 6)
+    plt.plot(ecg, label=label)
+    plt.title(f"{label} - T Wave")
+    plt.xlabel("Samples")
+    plt.ylabel("Amplitude")
     for t_onset, t_offset in zip(t_onsets, t_offsets):
         if np.isnan(t_onset) or np.isnan(t_offset):
             continue
-        plt.axvspan(t_onset, t_offset, color='orange', alpha=0.3, label="T Wave" if not t_plotted else "")
-        t_plotted = True
-    
+        plt.axvspan(t_onset, t_offset, color='orange', alpha=0.3, label="T Wave")
     plt.legend()
-    subplot_index += 1
-
-# レイアウト調整
-plt.tight_layout()
-plt.show()
-
-# 解析結果の表示
-for label, metrics in analysis_results.items():
+    
+    # レイアウト調整
+    plt.tight_layout()
+    plt.show()
+    
+    # 解析結果の表示
     print(f"--- {label} ---")
-    if not np.isnan(metrics['Average_HR_bpm']):
-        print(f"平均心拍数: {metrics['Average_HR_bpm']:.2f} bpm")
+    if not np.isnan(heart_rate):
+        print(f"平均心拍数: {heart_rate:.2f} bpm")
     else:
         print("平均心拍数: 計算不可")
     
-    if not np.isnan(metrics['HRV_SDNN_sec']):
-        print(f"HRV (SDNN): {metrics['HRV_SDNN_sec']:.4f} s")
+    if not np.isnan(hr_variability):
+        print(f"HRV (SDNN): {hr_variability:.4f} s")
     else:
         print("HRV (SDNN): 計算不可")
     
-    print(f"RR間隔のサンプル数: {len(metrics['RR_Intervals_sec'])}")
-    if len(metrics['QRS_Durations_sec']) > 0:
-        print(f"平均QRS幅: {metrics['QRS_Durations_sec'].mean():.4f} s")
+    print(f"RR間隔のサンプル数: {len(rr_intervals)}")
+    if len(rr_intervals) > 0:
+        print(f"平均RR間隔: {rr_intervals.mean():.4f} s")
+    else:
+        print("平均RR間隔: 計算不可")
+    
+    if len(p_durations) > 0:
+        print(f"平均P波持続時間: {p_durations.mean():.4f} s")
+    else:
+        print("平均P波持続時間: 計算不可")
+    
+    if len(p_amplitudes) > 0:
+        print(f"平均P波振幅: {p_amplitudes.mean():.4f} mV")
+    else:
+        print("平均P波振幅: 計算不可")
+    
+    if len(qrs_durations) > 0:
+        print(f"平均QRS幅: {qrs_durations.mean():.4f} s")
     else:
         print("平均QRS幅: 計算不可")
     
-    if len(metrics['T_Durations_sec']) > 0:
-        print(f"平均T波持続時間: {metrics['T_Durations_sec'].mean():.4f} s")
+    if len(t_durations) > 0:
+        print(f"平均T波持続時間: {t_durations.mean():.4f} s")
     else:
         print("平均T波持続時間: 計算不可")
     
-    if len(metrics['T_Amplitudes']) > 0:
-        print(f"平均T波振幅: {metrics['T_Amplitudes'].mean():.4f} mV")
+    if len(t_amplitudes) > 0:
+        print(f"平均T波振幅: {np.nanmean(t_amplitudes):.4f} mV")
     else:
         print("平均T波振幅: 計算不可")
     
-    print()
-
-# 必要に応じて詳細な解析結果をCSVに保存
-# for label, metrics in analysis_results.items():
-#     df = pd.DataFrame({
-#         "RR_Interval_sec": metrics["RR_Intervals_sec"],
-#         "QRS_Duration_sec": metrics["QRS_Durations_sec"],
-#         "T_Duration_sec": metrics["T_Durations_sec"],
-#         "T_Amplitude_mV": metrics["T_Amplitudes"]
-#     })
-#     df.to_csv(f"{label}_ECG_Features.csv", index=False)
+    if len(pr_intervals) > 0:
+        print(f"平均PR間隔: {pr_intervals.mean():.4f} s")
+    else:
+        print("平均PR間隔: 計算不可")
+    
+    if len(qt_intervals) > 0:
+        print(f"平均QT間隔: {qt_intervals.mean():.4f} s")
+    else:
+        print("平均QT間隔: 計算不可")
+    
+    print("\n")
+    
+    # 必要に応じて詳細な解析結果をCSVに保存
+    # df = pd.DataFrame({
+    #     "RR_Interval_sec": analysis_results[label]["RR_Intervals_sec"],
+    #     "P_Duration_sec": analysis_results[label]["P_Durations_sec"],
+    #     "P_Amplitude_mV": analysis_results[label]["P_Amplitudes_mV"],
+    #     "QRS_Duration_sec": analysis_results[label]["QRS_Durations_sec"],
+    #     "T_Duration_sec": analysis_results[label]["T_Durations_sec"],
+    #     "T_Amplitude_mV": analysis_results[label]["T_Amplitudes_mV"],
+    #     "PR_Interval_sec": analysis_results[label]["PR_Intervals_sec"],
+    #     "QT_Interval_sec": analysis_results[label]["QT_Intervals_sec"]
+    # })
+    # df.to_csv(f"{label}_ECG_Features.csv", index=False)
 
